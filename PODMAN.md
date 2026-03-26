@@ -315,10 +315,104 @@ journalctl --user -u coturn -f
 podman pull docker.io/jevolk/tuwunel:latest
 podman pull docker.io/library/caddy:latest
 systemctl --user restart tuwunel caddy
+```
 
-# Backup (stop first for consistency)
+### Backup (Borg + Hetzner Storage Box)
+
+[Hetzner Storage Box](https://www.hetzner.com/storage/storage-box/) provides SSH-accessible storage that works natively with BorgBackup. BX11 (1 TB) is plenty for a small homeserver.
+
+**One-time setup:**
+
+```bash
+sudo dnf install borgbackup
+
+# Generate a dedicated SSH key
+ssh-keygen -t ed25519 -f ~/.ssh/storage-box -N ""
+
+# Upload the key to Hetzner Storage Box
+cat ~/.ssh/storage-box.pub | ssh -p 23 uXXXXXX@uXXXXXX.your-storagebox.de install-ssh-key
+
+# Add to SSH config for convenience
+cat >> ~/.ssh/config <<EOF
+
+Host storagebox
+    HostName uXXXXXX.your-storagebox.de
+    User uXXXXXX
+    Port 23
+    IdentityFile ~/.ssh/storage-box
+EOF
+
+# Initialize the Borg repository
+borg init --encryption=repokey ssh://storagebox/./tuwunel
+
+# IMPORTANT: back up the repo key — without it, backups are unrecoverable
+borg key export ssh://storagebox/./tuwunel ~/borg-key-backup.txt
+# Store this key + the BORG_PASSPHRASE somewhere safe (password manager)
+```
+
+**Backup script** — `~/tuwunel-backup.sh`:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+export BORG_REPO="ssh://storagebox/./tuwunel"
+export BORG_PASSPHRASE="your-passphrase-here"  # or use BORG_PASSCOMMAND with a secret manager
+
 systemctl --user stop tuwunel
-tar czf tuwunel-backup-$(date +%F).tar.gz ~/tuwunel-data
+borg create --compression zstd \
+    "::tuwunel-{now:%Y-%m-%d_%H:%M}" \
+    ~/tuwunel-data
+systemctl --user start tuwunel
+
+borg prune --keep-daily=7 --keep-weekly=4 --keep-monthly=6
+borg compact
+```
+
+```bash
+chmod 700 ~/tuwunel-backup.sh
+```
+
+**Automate with a systemd timer** (nightly at 03:00):
+
+`~/.config/systemd/user/tuwunel-backup.service`:
+```ini
+[Unit]
+Description=Tuwunel Borg backup
+
+[Service]
+Type=oneshot
+ExecStart=%h/tuwunel-backup.sh
+```
+
+`~/.config/systemd/user/tuwunel-backup.timer`:
+```ini
+[Unit]
+Description=Nightly Tuwunel backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now tuwunel-backup.timer
+```
+
+**Restore:**
+
+```bash
+# List snapshots
+borg list ssh://storagebox/./tuwunel
+
+# Restore a specific snapshot
+systemctl --user stop tuwunel
+mv ~/tuwunel-data ~/tuwunel-data.old
+borg extract ssh://storagebox/./tuwunel::tuwunel-2026-03-25_03:00
 systemctl --user start tuwunel
 ```
 

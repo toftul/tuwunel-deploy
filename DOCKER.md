@@ -274,10 +274,83 @@ docker compose logs -f coturn
 cd ~/tuwunel
 docker compose pull
 docker compose up -d
+```
 
-# Backup (stop first for consistency)
+### Backup (Borg + Hetzner Storage Box)
+
+[Hetzner Storage Box](https://www.hetzner.com/storage/storage-box/) provides SSH-accessible storage that works natively with BorgBackup. BX11 (1 TB) is plenty for a small homeserver.
+
+**One-time setup:**
+
+```bash
+sudo apt install borgbackup
+
+# Generate a dedicated SSH key
+ssh-keygen -t ed25519 -f ~/.ssh/storage-box -N ""
+
+# Upload the key to Hetzner Storage Box
+cat ~/.ssh/storage-box.pub | ssh -p 23 uXXXXXX@uXXXXXX.your-storagebox.de install-ssh-key
+
+# Add to SSH config for convenience
+cat >> ~/.ssh/config <<EOF
+
+Host storagebox
+    HostName uXXXXXX.your-storagebox.de
+    User uXXXXXX
+    Port 23
+    IdentityFile ~/.ssh/storage-box
+EOF
+
+# Initialize the Borg repository
+borg init --encryption=repokey ssh://storagebox/./tuwunel
+
+# IMPORTANT: back up the repo key — without it, backups are unrecoverable
+borg key export ssh://storagebox/./tuwunel ~/borg-key-backup.txt
+# Store this key + the BORG_PASSPHRASE somewhere safe (password manager)
+```
+
+**Backup script** — `~/tuwunel/backup.sh`:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+export BORG_REPO="ssh://storagebox/./tuwunel"
+export BORG_PASSPHRASE="your-passphrase-here"  # or use BORG_PASSCOMMAND with a secret manager
+
+cd ~/tuwunel
+
 docker compose stop tuwunel
-tar czf ~/tuwunel-backup-$(date +%F).tar.gz ~/tuwunel/data
+borg create --compression zstd \
+    "::tuwunel-{now:%Y-%m-%d_%H:%M}" \
+    ~/tuwunel/data
+docker compose start tuwunel
+
+borg prune --keep-daily=7 --keep-weekly=4 --keep-monthly=6
+borg compact
+```
+
+```bash
+chmod 700 ~/tuwunel/backup.sh
+```
+
+**Automate with cron** (nightly at 03:00):
+
+```bash
+(crontab -l 2>/dev/null; echo "0 3 * * * $HOME/tuwunel/backup.sh >> $HOME/tuwunel/backup.log 2>&1") | crontab -
+```
+
+**Restore:**
+
+```bash
+# List snapshots
+borg list ssh://storagebox/./tuwunel
+
+# Restore a specific snapshot
+cd ~/tuwunel
+docker compose stop tuwunel
+mv data data.old
+borg extract ssh://storagebox/./tuwunel::tuwunel-2026-03-25_03:00
 docker compose start tuwunel
 ```
 
