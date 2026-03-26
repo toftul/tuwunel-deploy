@@ -364,6 +364,7 @@ borg create --compression zstd \
     "::tuwunel-{now:%Y-%m-%d_%H:%M}" \
     ~/tuwunel-data
 systemctl --user start tuwunel
+systemctl --user start caddy
 
 borg prune --keep-daily=7 --keep-weekly=4 --keep-monthly=6
 borg compact
